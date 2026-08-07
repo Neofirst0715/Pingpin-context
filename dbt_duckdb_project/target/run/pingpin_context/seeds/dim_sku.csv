@@ -1,0 +1,11 @@
+
+    
+    
+    truncate table "dev"."main"."dim_sku";
+    -- dbt seed --
+    
+          COPY "dev"."main"."dim_sku" FROM '/Users/neofirst/Library/Mobile Documents/com~apple~CloudDocs/20xx My Projects/pingpin-context/dbt_duckdb_project/seeds/dim_sku.csv' (FORMAT CSV, HEADER TRUE, DELIMITER ',')
+        
+
+;
+  

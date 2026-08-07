@@ -1,0 +1,6 @@
+duckdb
+dbt-duckdb
+mcp
+acryl-datahub
+langgraph
+pydantic
