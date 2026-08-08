@@ -1,0 +1,297 @@
+# Pingpin Agents — Changelog
+
+Daily dev log for the Etsy Enamel Pin multi-agent system (Condition C). Newest entry on top.
+
+---
+## 2026-07-13 — Replaced the outdated Mermaid architecture diagram with an accurate one; fixed stale cross-references in README
+
+**Problem:** the README's original architecture diagram (a Mermaid flowchart, drawn before any code existed) had drifted from reality in two concrete ways: it showed Agent 1 and Agent 2 grouped under "Information Gathering" with no visible branch for what happens on a compliance rejection, and it had no representation of Agent 5's final human delivery approval checkpoint at all (a real, shipped feature verified live on 07-05/07-06). A reader skimming the diagram would come away with an inaccurate picture of the actual control flow — specifically, they'd miss that Agent 1 is a hard gate (non-compliant concepts never reach Agent 2), and miss the entire approve/revise loop at the end of the pipeline.
+
+**Fix — new diagram, iterated against the real code, not redrawn from memory:**
+- Cross-checked every branch against `main.py`'s actual conditional edges (`should_proceed_after_compliance`, `should_continue_after_audit`, `should_continue_after_final_delivery`) before finalizing the diagram, rather than trusting the original hand-drawn sketch's assumptions.
+- Added an explicit `Agent 1 → Refuse → (rejected, ends)` branch, separate from the `Agent 1 → Agent 2` pass-through — this is the one true gate in the pipeline (Agent 2 has no equivalent reject branch of its own; it's a flat edge into Agent 3, confirmed against the real code).
+- Added Agent 5's `final_delivery_approval` step with its own `Approved` / `Revise` branches, with `Revise` correctly routing back to Agent 3 (not back into Agent 4's `human_intervention`, which an earlier draft of the diagram got wrong).
+- Unified the labels on every decision branch to match the literal string values used in the code (`Refuse`, `Fail(Violation)`, `Fail(Low Score)`, `Approved`, `Revise`) rather than ad hoc phrasing (e.g. the diagram previously used "Yes"/"Not Satisfied" for the final approval branch, which didn't correspond to anything in the codebase — `should_continue_after_final_delivery` literally checks for `"approved"` and otherwise returns `"revise"`).
+- Applied a Bauhaus-inspired color scheme (primary colors + black/white only, no gradients) mapping color to node *role* rather than sequence: blue = gating/judgment nodes (Agent 1, Hard Gate), yellow = processing/human-correction nodes (Agent 2, both human-in-the-loop steps), red = the core generation step (Agent 3), black = decision-container nodes (Agent 4, Agent 5 outer frames).
+- Replaced the Mermaid code block in `README.md` with a static image reference (`Architecture-diagram.png`), since the new diagram's hand-drawn styling isn't something Mermaid syntax can reproduce.
+
+**README cross-reference fixes (caught while swapping in the new diagram):**
+- Removed the old disclaimer above the diagram ("this diagram predates the current implementation and is pending an update") — it referred to the just-replaced Mermaid diagram and no longer applied; replaced with a note confirming the new diagram reflects the current implementation as verified live on 07-06. (Also caught that the old disclaimer's "see Agent 2's Current Limitation note **above**" was backwards — that note is below the Architecture section, not above; moot now that the disclaimer is gone, but logged so the same mistake isn't repeated.)
+- Fixed the image's alt text, which had been left as the literal placeholder string `"alt text"`.
+- Updated the 07-05 end-to-end verification writeup: it previously described the human-correction routing gap as "noted below" (implying still-open), which read as stale/contradictory once the Known Issues section marked that same gap as fixed on 07-06. Added an explicit forward-reference noting the gap was fixed the following day.
+- Added a "Routing distinguishes agent-authored vs human-authored rejections" paragraph to the Agent 4 section describing the `last_edit_source` mechanism — this fix (07-06) had only ever been documented in Known Issues, so a reader going through the Agent 4 write-up top-to-bottom would never have learned the mechanism exists.
+
+**No code changed today — this was a documentation/diagram accuracy pass only.**
+
+---
+## 2026-07-06 — Fixed the human-correction routing gap; verified on live ECS after a deployment miss
+
+**Bug being fixed (found during 07-05 end-to-end testing):** when a human-supplied correction to a rejected draft *itself* failed the hard gate, the graph did not immediately return the failure to the human. Instead, `should_continue_after_audit` treated it identically to an agent-generated failure — checked `retry_count < 2` and routed back to `listing_draft` (A3), which silently discarded the human's edit and generated an entirely new draft from scratch. Only after that automated regeneration also failed did it return to `human_intervention`. The human's specific correction effort was thrown away without any feedback.
+
+**Root cause:** the router had no way to distinguish whether the rejected draft came from A3 or from a human edit — both paths wrote the same shape of state, so the same `retry_count` logic applied to both.
+
+**Fix — four small, additive changes, no A3 logic touched:**
+- `PingPinGoState`: added `last_edit_source: str` (`"agent" | "human"`).
+- `a3_listing_draft.py`: `listing_draft_node`'s return now includes `"last_edit_source": "agent"`.
+- `a4_audit_node.py`: `human_intervention_node`'s return now includes `"last_edit_source": "human"`.
+- `main.py`: `should_continue_after_audit` now checks `last_edit_source == "human"` **before** the `retry_count < 2` check — a human-sourced rejection routes straight back to `human_intervention` regardless of retry count remaining; only agent-sourced rejections still go through the automatic `revise` loop.
+
+**Deployment lesson (hit again, logged so it isn't repeated a third time):** the first two verification attempts today, against a live server, showed the bug still occurring — a submitted correction still triggered a full A3 regeneration. This was **not** a code problem: `git log` on the server showed the fix commit was present and `grep -n "last_edit_source" main.py` on the server confirmed the routing code was there. The actual cause was that the running `uvicorn` process on the server predated the fix and had never been restarted — pulling new code onto disk does not affect an already-running Python process holding old code in memory. **Lesson (already logged 07-05, reconfirmed here): a `git pull` succeeding on the server is not sufficient evidence that a fix is live — the server process must be killed and relaunched (`nohup uvicorn ...`) after every code change before re-testing.** Also worth noting: because the checkpointer (`MemorySaver`) is in-memory only, restarting the process wipes all in-flight thread state — any interrupted `thread_id` from before a restart is unrecoverable and testing must resume with a fresh `sku`.
+
+**Verified live on ECS after confirming the process was actually restarted** (`sku: ROUTE-TEST-03`): a draft was rejected on word count (167 words) and paused for human correction; a deliberately-still-invalid 19-word correction was submitted via `/resume` — the response's `current_title`/`current_description` came back as the **exact text just submitted**, with `reason` correctly reporting "19 words found" — confirming the correction was routed straight back to human review rather than silently discarded into an A3 regeneration. A properly-sized (102-word) correction then passed the hard gate and soft scoring (14/20, sub-scores summed correctly: 4+3+4+3), reached final delivery approval, and completed with `"status": "complete"` on approval.
+
+---
+
+## 2026-07-06 — Fixed the human-correction routing gap; verified on live ECS after a deployment miss
+
+**Bug being fixed (found during 07-05 end-to-end testing):** when a human-supplied correction to a rejected draft *itself* failed the hard gate, the graph did not immediately return the failure to the human. Instead, `should_continue_after_audit` treated it identically to an agent-generated failure — checked `retry_count < 2` and routed back to `listing_draft` (A3), which silently discarded the human's edit and generated an entirely new draft from scratch. Only after that automated regeneration also failed did it return to `human_intervention`. The human's specific correction effort was thrown away without any feedback.
+
+**Root cause:** the router had no way to distinguish whether the rejected draft came from A3 or from a human edit — both paths wrote the same shape of state, so the same `retry_count` logic applied to both.
+
+**Fix — four small, additive changes, no A3 logic touched:**
+- `PingPinGoState`: added `last_edit_source: str` (`"agent" | "human"`).
+- `a3_listing_draft.py`: `listing_draft_node`'s return now includes `"last_edit_source": "agent"`.
+- `a4_audit_node.py`: `human_intervention_node`'s return now includes `"last_edit_source": "human"`.
+- `main.py`: `should_continue_after_audit` now checks `last_edit_source == "human"` **before** the `retry_count < 2` check — a human-sourced rejection routes straight back to `human_intervention` regardless of retry count remaining; only agent-sourced rejections still go through the automatic `revise` loop.
+
+**Deployment lesson (hit again, logged so it isn't repeated a third time):** the first two verification attempts today, against a live server, showed the bug still occurring — a submitted correction still triggered a full A3 regeneration. This was **not** a code problem: `git log` on the server showed the fix commit was present and `grep -n "last_edit_source" main.py` on the server confirmed the routing code was there. The actual cause was that the running `uvicorn` process on the server predated the fix and had never been restarted — pulling new code onto disk does not affect an already-running Python process holding old code in memory. **Lesson (already logged 07-05, reconfirmed here): a `git pull` succeeding on the server is not sufficient evidence that a fix is live — the server process must be killed and relaunched (`nohup uvicorn ...`) after every code change before re-testing.** Also worth noting: because the checkpointer (`MemorySaver`) is in-memory only, restarting the process wipes all in-flight thread state — any interrupted `thread_id` from before a restart is unrecoverable and testing must resume with a fresh `sku`.
+
+**Verified live on ECS after confirming the process was actually restarted** (`sku: ROUTE-TEST-03`): a draft was rejected on word count (167 words) and paused for human correction; a deliberately-still-invalid 19-word correction was submitted via `/resume` — the response's `current_title`/`current_description` came back as the **exact text just submitted**, with `reason` correctly reporting "19 words found" — confirming the correction was routed straight back to human review rather than silently discarded into an A3 regeneration. A properly-sized (102-word) correction then passed the hard gate and soft scoring (14/20, sub-scores summed correctly: 4+3+4+3), reached final delivery approval, and completed with `"status": "complete"` on approval.
+
+---
+
+## 2026-07-05 — Deployed 07-04 update to Alibaba Cloud ECS, verified the two-checkpoint pipeline end-to-end over HTTP
+
+**Goal:** get the 07-04 changes (final delivery approval loop, category-hallucination fix, `interrupt()`/checkpointer rework) actually running on the deployed ECS server, and verify — for real, over the API, not just locally — that both human-in-the-loop checkpoints work end to end.
+
+**Deployment (harder than expected — logged step by step since each blocker is a real, reusable lesson):**
+- `git pull` on the server initially failed: local changes on the server to `.gitignore`, `agents/api.py`, and (unexpectedly) tracked ChromaDB binary files (`chroma.sqlite3`, `data_level0.bin`) and `logs/listing_archive.csv` conflicted with the incoming commit. Resolved with `git reset --hard origin/main` (after confirming no server-only data was worth keeping) — a clean way to force the server to match GitHub exactly when server-side files were never meant to be tracked in the first place.
+- `requirements.txt` (a straight `pip freeze` export from local dev) failed on the server's Aliyun mirror: `numpy==2.5.0` and `onnxruntime==1.27.0` don't exist on that mirror (mirror only has numpy up to 2.2.6, onnxruntime up to 1.23.2). **Lesson:** pinning exact versions from `pip freeze` is fragile across environments/mirrors; base libraries should generally use range constraints (`>=`), not `==`, in a requirements file meant to be portable. Worked around it for now by installing the actual needed top-level packages directly (unpinned), letting pip resolve compatible versions from what the mirror has.
+- `KeyError: 'DASHSCOPE_API_KEY'` on startup — the server's `agents/.env` (correctly `.gitignore`d, so never synced by git) didn't exist yet on this server. Created it manually with the real key.
+- Port 80 conflict (`address already in use`) — a stale `uvicorn` process from an earlier deploy was still bound to the port. Found and killed it via `lsof -i :80` / `kill`, then relaunched.
+- Switched the launch command from a bare foreground `uvicorn ...` to `nohup uvicorn ... > app.log 2>&1 &`, so the API server survives closing the SSH session. (Still not `systemd`-managed — if the ECS instance reboots, the process won't auto-restart. Logged as a follow-up.)
+
+**End-to-end HTTP verification of the two-checkpoint flow (the actual point of today):**
+Ran a real product concept (`sku: TEST-001`) through the live deployed API, not a local script, exercising both new checkpoints:
+
+1. `POST /generate` → hard gate rejected the first draft (159 words, over the 150 max) → graph auto-retried once internally (A3 regenerated, still 166 words) → `retry_count` hit 2 → paused at `human_intervention` (A4's HITL gate), returning `{"reason", "current_title", "current_description"}`.
+2. First `/resume` attempt used a corrected description that (unintentionally) came in at 98 words — under the 100-word *minimum*. This exposed a real routing gap (see below) rather than fixing anything.
+3. Sent a properly-sized (102-word) correction via `/resume` — passed the hard gate **and** soft scoring (17/20: tone 5, selling points 4, naturalness 5, differentiation 3 — Python-summed, matching the earlier fix), advanced to `delivery` (A5 archive), then paused at `final_delivery_approval` (A5's new HITL gate), returning `{"preview": {"title", "description"}}`.
+4. `/resume` with `{"final_approval": "approved"}` → `"status": "complete"`, full result payload returned (`final_title`, `final_description`, `audit_result`, `is_compliance: true`, `system_feedback: "Passed"`).
+
+**This confirms, for the first time over real HTTP against the deployed server:** both `interrupt()` checkpoints correctly pause and resume via `thread_id`; the `MemorySaver` checkpointer persists state across the pause; `check_hard_rules` and the Python-summed soft-scoring both work correctly against DashScope cloud Qwen; and the full A1→A2→A3→A4(retry loop)→A5(approval loop) chain is real and deployable, not just a local CLI demo.
+
+**Design gap discovered (not yet fixed) — human corrections silently fall into the automatic A3 retry loop:**
+When the 98-word correction failed the hard gate, the graph did *not* re-prompt the human immediately. Instead: `audit_node` incremented `retry_count` (reset to 0 by `human_intervention_node` just before) and routed via `should_continue_after_audit`'s ordinary `retry_count < 2` check straight back to `listing_draft` (A3) — which regenerated **entirely new copy from scratch**, discarding the human's edit completely, rather than giving the human immediate feedback that their specific correction still didn't pass. Only after that automated regeneration also failed did it return to `human_intervention`.
+- **Root cause:** `should_continue_after_audit` treats a hard-gate failure identically regardless of whether the rejected draft came from A3 or from a human edit — it has no way to distinguish the two.
+- **Fix is a routing concern, not an A3 concern.** A3's job (generate/revise from signals + feedback) doesn't change. The proposed fix: add a `last_edit_source: "agent" | "human"` field to state, set by `listing_draft` and `human_intervention_node` respectively, and have the router check it — a human-sourced rejection routes straight back to `human_intervention` (with the specific violation reason) instead of falling into the A3 auto-retry loop. Not yet implemented; logged as a concrete next step.
+
+---
+
+## 2026-07-04 — Final delivery approval loop, product-category truth source, interrupt-based HITL
+
+**Theme:** closing the loop between "audit passed" and "actually shipped," and killing a hallucination pattern where the model would mis-classify a product's core identity.
+
+**1. Final Delivery Approval — a second human checkpoint after A5**
+- A4's audit passing no longer means automatic shipment. Added `human_delivery_approval_node`: after `delivery` (A5) formats and archives the listing, the graph now shows the final title/description to a human and waits for a yes/no.
+- **New conditional edge:** `delivery → final_delivery_approval → (approved) → END` / `(rejected) → listing_draft`. Rejection isn't a dead end — it's a proper revise loop, with the human's specific complaint written into `system_feedback` so A3 gets targeted correction, not a blind retry.
+- This closes the full production pipeline: input → compliance → SEO extraction → draft → audit (with its own retry loop) → **human final approval** → deliver.
+
+**2. Fixed a product-hallucination bug (mis-classifying a MacBook as a "case")**
+- **Problem:** the agent would sometimes take a product idea for a standalone electronic device (e.g. a MacBook) and, pulled toward popular Etsy search terms, generate copy as if it were an *accessory for* that device (a sleeve/case) rather than the device itself.
+- **Root cause:** there was no single field acting as ground truth for "what kind of product is this" — category was being inferred freshly (and inconsistently) at each step.
+- **Fix — `category` promoted to a first-class state field.** Added `category: str` to `PingPinGoState` so product identity is decided once and referenced everywhere downstream, instead of being re-guessed by each agent.
+- **A2 prompt hardening — "PRODUCT TYPE LOCK".** `seo_extraction_node`'s prompt now explicitly instructs: if the input is a standalone hardware device, the category **must** be Electronics/Hardware — the model is told not to hallucinate it into an accessory/case/sleeve based on trending Etsy search terms. Category classification uses the user's stated product info as the source of truth, not popularity-driven association.
+- **A1 compliance tied to category accuracy.** `ComplianceVerdict` gained `product_type_accuracy: bool`, and `compliance_node` now checks the assigned `category` against the user's original idea for logical consistency. Final `system_feedback` is a **joint** condition — `is_compliant AND product_type_accuracy` — so a compliant-but-mis-categorized product still fails and reports which check it failed. This closes an actual policy-risk path: mis-classifying a device as an accessory could otherwise let a restricted electronics listing slip through as a "case."
+
+**3. Engineering / stability fixes**
+- **Replaced `Command(...)` constructor-arg pattern with the global `interrupt()` function** — the current `langgraph` version had a construction conflict with passing `Command` directly; switched to the recommended `interrupt()` call pattern for human-in-the-loop pauses, used in both `human_intervention_node` (A4) and `human_delivery_approval_node` (A5).
+- **`MemorySaver` checkpointer added**, keyed by SKU (`thread_id`), enabling the workflow to actually pause on `interrupt()` and resume later with `Command(resume=...)` — required for both HITL checkpoints to function across turns.
+- **`main.py` rebuilt around a single `while` loop** over `state_snapshot.tasks`, generically catching *any* pending interrupt rather than hard-coding one. The loop inspects the interrupt payload shape (`"preview" in payload` → final-delivery approval; else → audit rejection) and routes to the right human-input flow — one control loop handles two different kinds of human checkpoints instead of duplicating the resume logic per interrupt type.
+- Fixed a `None`-return `AttributeError` from the `delivery` node.
+- Resolved a ChromaDB persistence path / API-key auth failure by pre-checking the persist path before store creation.
+- Standardized on `git commit` / `git push` for versioning this round of changes.
+
+**Still open (backlog):**
+- Build `LocalDataSourceManager` — scan a local file directory to import competitor/product data instead of manual paste, replacing the current manual-input flow for A2.
+- A3 prompt weighting: `tone_preference` (e.g. "funny", "very cool") should be enforced as a top-priority instruction, not just one signal among several — currently it can get diluted by the other fused signals.
+- Further CSV log schema refinement for full-chain data retention (tie every archived row cleanly to which HITL checkpoints fired and what feedback was given).
+
+---
+
+## 2026-07-02 — Migrated the whole pipeline from local Ollama to DashScope cloud Qwen
+
+**Why:** the local `qwen2.5:7b` was the weak link — it hedged on compliance judgments and scored inconsistently in A4. Moved all four LLM-using files (A1–A4) to Alibaba's DashScope cloud Qwen for the Qwen Hackathon submission and for noticeably better output quality.
+
+**Changes:**
+- **LLM swap (A1/A2/A3/A4):** `ChatOllama(qwen2.5:7b)` → `ChatOpenAI(model="qwen-plus", base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1")`. DashScope exposes an OpenAI-compatible endpoint, so the swap is mostly a client + base_url change, not a rewrite.
+- **Embeddings (A1):** `OllamaEmbeddings(nomic-embed-text)` → `DashScopeEmbeddings(text-embedding-v3)`.
+- **Secrets:** API key stored in `agents/.env` (confirmed `.gitignore`d — not committed).
+- **Deps:** installed `langchain-openai` and `dashscope`.
+
+**Bugs / gotchas hit and fixed:**
+1. **401 InvalidApiKey on embeddings.** The `dashscope` SDK defaults to the *domestic* China endpoint, but this key is an *international* account key. Fixed by explicitly pointing the SDK at the intl endpoint: `dashscope.base_http_api_url = "https://dashscope-intl.aliyuncs.com/api/v1"`.
+2. **Embedding-dimension clash in Chroma.** The existing vector store was built with local `nomic-embed-text` (768-dim); cloud `text-embedding-v3` produces a different dimension, and mixing them crashes the store. Fixed by using a fresh `collection_name = "Neo_research_qwen"` so the old and new stores don't collide.
+3. **A4 self-reported total score was unreliable.** The model's self-reported `score` frequently didn't match the sum of its own four sub-scores (observed: four dimensions summed to 18, but the model reported 4) — which was falsely rejecting copy that should have passed. Fixed by computing the final score as the **sum of the four sub-scores** in Python, no longer trusting the model's self-reported total. (Same principle as before: deterministic arithmetic belongs in Python, not the LLM.)
+
+**Result:** cloud Qwen is clearly better than local 7B — a listing passed audit at **18/20 after one retry**, then produced title + description and archived to CSV. End-to-end run is solid.
+
+**Still open:** the vector store rebuilds on every run (the known performance issue) — still functional, just wasteful; can be optimized later by loading an existing persisted store instead of rebuilding.
+
+---
+
+## 2026-06-30 — Agent 5 finished + A1 compliance_node implemented → first true end-to-end run
+
+**This is the milestone day: the pipeline ran start-to-finish for the first time.** Two things landed — A5 (the archive terminus) and A1's real compliance node (the last stub) — which together closed the loop from "SKU concept in" to "archived listing out."
+
+**Agent 5 — Deliver & Archive (clean terminus, no human loop):**
+- Confirmed the design decision from the day before: **A5 is a pure terminus** — format + archive + log, then END. The "human polish → back to A3" loop was deliberately **rejected** for now, because reintroducing an open-ended human edit step would inject a non-standardizable variable and break Condition C's reproducibility. Logged as a post-experiment productization idea, not built.
+- **A5 imports nothing but the state type + its own tools (`csv`, `os`, `datetime`).** It reads everything it needs (`is_compliance`, `keyword_list`, `audit_result`, etc.) straight from shared state — no importing other agents. State is the memory; results are already sitting there from upstream runs.
+- **Two functions + assembly:** a formatting step (format only, no content change — content was already finalized by A4), and an archive function that appends one row per run to `logs/listing_archive.csv` (auto-writes header on first run, `DictWriter`).
+- **Log fields include prompt versions** (`a2_prompt_version` / `a3_prompt_version` / `a4_prompt_version`), pulled from config constants — the reproducibility anchor, so any archived listing can later be traced to the exact prompt versions that produced and scored it. CSV chosen so the data loads straight into pandas/scipy for the experiment analysis in August.
+- **Bugs fixed:** `log_data` scope error (it was a local var in one function that a separate archive function couldn't see — fixed by passing it as an argument instead of trying to share it across functions); `datetime.now()` → `datetime.datetime.now()`; duplicate `audit_config` import; state class-name type hint corrected.
+
+**Agent 1 — compliance_node finally implemented (the last stub):**
+- Built A1 as a **sub-graph**: `call_model ⇄ tool_node` loop (LLM decides it needs policy → calls `retriever_tool` → gets clauses back → judges), wired with `tools_condition`, compiled as its own app and invoked from the main graph's `compliance_check` node. Keeps A1's tool loop encapsulated and decoupled from the linear A2–A5 flow.
+- **Structured final verdict:** after the retrieval loop, a `with_structured_output(ComplianceVerdict)` step forces the model to emit a typed `{is_compliant: bool, reason: str}` — no free-text hedging — which is then written to state as `is_compliance` / `system_feedback`. Same structured-output discipline used in A2/A4.
+- **Verified the tool is actually called** (the known local-model failure mode: models "narrate" a tool call while `tool_calls` comes back empty). Added a print inside `retriever_tool` to confirm real invocation, not narration.
+- **Bugs fixed:** `llm.inference()` → `llm.invoke()`; `call_model` return wrapped as `{"messages": [response]}` (list, for `add_messages`); the write-key was `system_prompt` → corrected to `system_feedback`; and the node no longer hard-codes `is_compliance: True` — it now reflects the actual verdict.
+
+**Result:** with A1 real and A5 in place, the graph ran end-to-end for the first time — concept screened, signals extracted, copy drafted, audited (with a retry), and archived to CSV.
+
+---
+
+## 2026-06-28 — Agent 4 (audit) built + full graph wired in main.py
+
+**Role:** Agent 4 is the critic. It decides whether A3's draft is good enough to ship, or must be sent back for revision. This is also the day the four nodes (A1→A2→A3→A4) were wired into one compiled graph for the first time — the project goes from "separate parts" to "a system."
+
+**Design decisions — two-layer audit (hard gate, then soft scoring):**
+- **Hard gate is pure Python, pass/fail, no LLM.** `check_hard_rules()` checks the objective, deterministic things: description word count (100–150), banned-word blacklist match, and presence of at least one use-case signal. If any fail, the draft is rejected immediately and never reaches the LLM — this is the cheapest, most reliable layer and runs first.
+- **Soft scoring is LLM, and only runs after the hard gate passes.** `AuditResult` (Pydantic) carries only the subjective dimensions the LLM is actually responsible for: `tone_match`, `selling_points`, `naturalness`, `differentiation` (each 0–5), a total `score` out of 20, and `feedback_points`. Hard-gate results are deliberately **not** in `AuditResult` — they belong to Python's path, not the model's output contract.
+- **The pass/fail threshold decision is Python's, not the LLM's.** The LLM only scores; whether `score < 12` counts as a failure is decided in `audit_node` with a plain Python `if`. "How many points is a fail" is a deterministic rule, so it shouldn't be left to a probabilistic model — same principle as the hard gate.
+- **Rules live in a separate config, not hard-coded in the function.** `BANNED_WORDS`, `USE_CASE_SIGNALS`, `MIN/MAX_WORD_COUNT` moved into `audit_config.py` (single source of truth; changing a rule never touches logic code). Discussed the longer-term maintenance loop: rejected cases get logged → reviewed by a human → confirmed rules added back to the config. The config is slowly-evolving knowledge sourced from real runs, not a one-time guess.
+- **Blacklist kept narrow on purpose.** Context-dependent words like "best"/"authentic" are *not* blanket-banned (they appear in legitimate Etsy copy, e.g. "best gift for mom") — judging those is left to the LLM soft layer to avoid false positives.
+
+**Graph wiring (`main.py`) — four nodes compiled into one loop:**
+- Entry: `compliance_check`.
+- `compliance_check` → conditional edge on `is_compliance` (`True` → `seo_extraction`, `False` → `END`).
+- `seo_extraction` → `listing_draft` (flat edge).
+- `listing_draft` → `audit_node` (flat edge).
+- `audit_node` → conditional edge `should_continue_after_audit`: `Passed` → `END`; `retry_count < 2` → back to `listing_draft` (revise); else → human intervention.
+
+**Bugs caught and fixed during review:**
+- `audit_node`: `result["score"]` → `result.score` (Pydantic attribute access, not dict); `SOFR_THRESHOLD` typo → `SOFT_THRESHOLD`; `adudit_result` typo → `audit_result` (must match the state field name or LangGraph drops it); spacing in `"; ".join(...)`.
+- `main.py`: the audit routing was mistakenly attached to `listing_draft` instead of `audit_node`, with a stray `audit_node → END` — meaning audit never actually ran. Re-attached the conditional edge to `audit_node` and removed the duplicate/conflicting `audit_node → END` edge.
+- `main.py`: `"passed"` vs `"Passed"` case mismatch between the router and `audit_node`'s return (would have judged every pass as a fail).
+- `main.py`: `is_complete` vs `is_compliance` field-name mismatch (would have judged every SKU non-compliant); `workflow.complile()` typo; duplicate/inconsistent imports cleaned up.
+
+**Still pending after today:**
+- Confirm `compile()` runs clean (no unknown-node / dead-end graph errors), then feed one test input end-to-end to watch data flow across all four nodes.
+- `SOFT_THRESHOLD = 12` should move into `audit_config.py` with the other constants.
+- Keyword-coverage check is in the hard-gate design but not yet in `check_hard_rules()`; decide coverage as a threshold (e.g. ≥80%) rather than 100%, to avoid over-strict rejection.
+- Attribute-consistency check (compare draft against SKU data) still to be added to the hard gate.
+- A1's `compliance_node` still not implemented — the graph compiles, but the A1 node can't actually run until that's built.
+
+---
+
+## 2026-06-27 — Agent 3: Drafting agent with feedback loop
+
+**Role:** Agent 3 is the copywriter — it fuses every upstream signal into a `title` + `description`. It's the point where all prior agents' outputs converge.
+
+**Design decisions:**
+- **One base prompt + conditional append (route B), not two separate prompts.** The standard to meet (Etsy rules, word count, keyword coverage) is identical on the first pass and on a retry — what changes is the *material*, not the strictness. First pass = "write from scratch"; retry = "revise against feedback." Keeping one base prompt avoids maintaining the Etsy rules / tone block in two places (single source of truth).
+- **Retry logic via `retry_count`:** if `retry_count == 0`, run first-pass generation (fuse A2 signals + own data + tone). If `retry_count >= 1`, append a feedback block to the base prompt — last draft (`draft_title` / `draft_description`) + `system_feedback` from A4 — and instruct targeted revision.
+- **No separate memory for A3.** State *is* the memory: A1/A2 outputs persist in state, so when A4 routes back to A3, A3 re-reads `keyword_list` / `selling_point` etc. directly — A1 and A2 do **not** re-run. The retry edge is `A4 → A3`, not `A4 → A1`.
+- **Tone handling:** if the user supplied a `tone_preference`, fold it into the prompt; if blank, let the LLM self-determine a market-appropriate tone (Python decides which branch, not the LLM).
+
+**Code:**
+- Implemented `construct_draft_prompt` with structured XML tags guiding the LLM output, improving generation quality and robustness.
+- Used a Pydantic `BaseModel` + `re` (regex) to cleanly split title and description into separate fields instead of parsing one blob of text.
+- State-aware generation wired through `retry_count` + `system_feedback`, giving A3 the ability to self-iterate based on audit results.
+
+**State management understanding (consolidated):**
+- Confirmed the mental model: `State` is a shared dict; read with `state.get()` / `state[]`. Data written by any node persists for all later nodes — that's what makes the A4→A3 retry loop work without re-running A1/A2.
+- Division of labor locked in: A1 = gatekeeper (compliance veto), A2 = material extractor (SEO signals), A3 = copy synthesizer.
+
+**Engineering fixes:**
+- Resolved the `if __name__ == "__main__":` logic trap (the earlier quoted-string version that never ran) and cleaned up function scope for proper modularity.
+- Fixed `main.py` workflow logic: removed a duplicate edge and repaired the conditional edge so the graph forms a proper closed loop.
+- Added defensive handling for `KeyError` and regex-match failures; addressed unreachable-code (greyed-out) static-analysis hints.
+
+**Still pending after today:**
+- A3↔A4 loop isn't closeable until A4 exists — `retry_count` increment ownership needs to be nailed down (leaning: A4 increments on reject, A3 only reads). *(Settled 06-28: A4 increments on reject, A3 only reads.)*
+- `main.py` still needs `workflow.compile()` + an end-to-end invocation entrypoint before the A1→A2→A3 trunk can actually run start to finish.
+
+---
+
+## 2026-06-26 — Agent 2: Designed and implemented from scratch
+
+**Problem identified:**
+User-pasted competitor listing text can be noisy — marketing fluff, social media links, malformed/poorly structured text. This must not flow into Agent 3 unfiltered, or generated copy quality drops.
+
+**Design decisions:**
+- Agent 2 reframed as a **Quality Gate**, not just a data collector — it sanitizes before it extracts.
+- Adopted a **Signal Extraction Pattern**: instead of manual `if`-gates (hard to maintain, easy to over-strip useful terms like "Personalized"), let the LLM do semantic categorization via a structured-output contract.
+- Defined `CompetitorSignal` (Pydantic `BaseModel`) as the data contract:
+  - `is_valid: bool` — hard pass/fail flag (noise / no product attributes → `False`)
+  - `keywords: List[str]` — deduplicated
+  - `selling_points: List[str]` — material, size, use-case
+  - `reasoning: str` — audit trail for why something passed/failed
+- **Rejected ChromaDB/vector store for A2.** Competitor text is a single short pasted listing — no retrieval needed, just send it straight into the LLM's context window. Vector stores are for A1's use case (searching hundreds of policy pages), not for passing one short string through state.
+- **Data priority rule confirmed:** when both own-shop historical conversion data and competitor data exist, own data is "ground truth" and takes priority over competitor data ("market signal," speculative).
+- **Manual-paste-first confirmed** for competitor data collection — no scraping, which also keeps the project clear of Etsy's ToS restrictions on automated data collection (covered in an earlier discussion).
+
+**Code:**
+- First draft of `seo_agent_node(state)` written: reads `competitor_data` from state, calls `structured_llm.invoke()`, writes back `keyword_list` / `selling_point` / `seo_metadata`.
+- Code review caught and fixed: unused leftover import from A1 (`persist_directory`), dead code line (`competitor_data = f"state[HumanMessage]"` did nothing, removed), unused imports left over from the dropped Chroma approach (`Chroma`, `PyPDFDirectoryLoader`, splitters, etc.).
+- **Not yet fixed:** `if "__name__" == "__main__":` — the quotes around `__name__` mean this condition is never true. Needs the quotes removed. *(Fixed 06-27.)*
+- **Not yet resolved:** state class name is spelled three different ways across files — `pingpingostate`, `PinpingoState`, `pinpingostate`. Must be locked to one spelling project-wide before anything will import cleanly.
+
+**Environment fixes:**
+- Resolved a venv/PATH issue: `pip`/`python3` were resolving to the Homebrew global install instead of the project's `.venv`. Fixed by deleting and recreating `.venv`, then re-activating.
+- Confirmed `.gitignore` correctly excludes `.env`, `.venv/`, and private data folders from git tracking; covered `git rm -r --cached <folder>` for the case where something was committed before `.gitignore` existed.
+
+---
+
+## 2026-06-25 — A1 Compliance Agent + main.py: Code review
+
+Reviewed `a1_compliance_agent.py`, `pingpingostate.py` (state file), early `a2_seo_extraction_agent.py` draft, and `main.py`. Found:
+
+- **A1:** placeholder paths (`folder_path`, `persist_directory`) never replaced with real paths; typo `retriever.inovke()` → should be `.invoke()`.
+- **A1's biggest gap:** the file only builds the retriever + `retriever_tool` — there is no `compliance_node` function that actually calls the LLM, loops on tool calls, and writes `is_compliance` / `system_feedback` into state. This is what `main.py` was trying to import and it didn't exist yet.
+- **A2 (early draft):** imported `persist_directory` from A1, which caused A1's entire PDF-loading + Chroma-build code to re-execute every time A2 was imported (module-level side effect — fixed today by moving to a guarded/function-based setup).
+- **main.py:** `langgrah` typo; `add_edge()` misused with a function instead of two node-name strings; **no conditional edge after `compliance_check`** — was a flat unconditional edge straight to `seo_extraction`, which contradicts the design (non-compliant SKUs should `END` immediately, not proceed); no `workflow.compile()` anywhere.
+
+---
+
+## Open items / Next steps
+
+- [ ] Lock the state class to one spelling everywhere (`PinpingoState` is the most consistent choice — fix all imports to match)
+- [x] Fix `if "__name__" == "__main__":` typo in A2 *(done 06-27)*
+- [ ] Implement `compliance_node` in A1 (LLM + tool loop + state write), reusing the `call_llm` / `take_action` / `should_continue` pattern already working in `RAG_Agent.py`
+- [x] Wire A1 → A2 in `main.py` with a **conditional edge** after `compliance_check` *(done 06-28)*
+- [x] Add `workflow.compile()` to `main.py` *(done 06-28)*
+- [x] Decide `retry_count` increment ownership *(settled 06-28: A4 increments on reject, A3 reads only)*
+- [x] Build Agent 4 (audit node): Python hard-rule gate → LLM soft-scoring → write `system_feedback` for the A3 retry loop *(done 06-28)*
+- [x] Handle the retry-cap exit: route to human intervention when `retry_count` hits the threshold *(done 06-28, in `should_continue_after_audit`)*
+- [x] Implement `compliance_node` in A1 (LLM + tool loop + structured verdict) *(done 06-30)*
+- [x] Build Agent 5 (format + archive to CSV + experiment log with prompt versions) *(done 06-30)*
+- [x] First end-to-end run through all nodes *(done 06-30; hardened on cloud Qwen 07-02)*
+- [x] Migrate LLM + embeddings from local Ollama to DashScope cloud Qwen *(done 07-02)*
+- [ ] Optimize Chroma: load the persisted store instead of rebuilding it on every run
+- [ ] Move `SOFT_THRESHOLD` into `audit_config.py` with the other rule constants
+- [ ] Add keyword-coverage check to `check_hard_rules()` as a threshold (e.g. ≥80%), not 100%
+- [ ] Add attribute-consistency check (draft vs SKU data) to the hard gate
+- [ ] A1 `folder_path` / `persist_directory` still hardcoded absolute paths — make relative or env-configured
+- [x] Lock the state class to one spelling everywhere — settled on `PingPinGoState` *(done, reflected as of 07-04)*
+- [x] Add a final human approval checkpoint after delivery, with a revise-loop back to A3 on rejection *(done 07-04)*
+- [x] Fix product-category hallucination (device mis-classified as accessory) via a `category` state field + A2 "PRODUCT TYPE LOCK" prompt + A1 `product_type_accuracy` check *(done 07-04)*
+- [x] Replace `Command(...)` constructor pattern with `interrupt()` for HITL stability *(done 07-04)*
+- [x] Add `MemorySaver` checkpointer so interrupts can pause/resume across turns *(done 07-04)*
+- [x] Deploy 07-04 changes to Alibaba Cloud ECS and verify the two-checkpoint HITL flow end-to-end over HTTP *(done 07-05)*
+- [x] Fix routing gap: human-sourced corrections that fail the hard gate now route straight back to `human_intervention` via `last_edit_source` *(fixed and verified live on ECS 07-06, after catching a stale-process deployment miss)*
+- [ ] Move the API server from a bare `nohup` background process to a `systemd` service, so it survives an ECS reboot
+- [ ] Clean up `requirements.txt`: replace `pip freeze`-exported exact pins (`==`) on base libraries like numpy with range constraints (`>=`), so it installs cleanly on mirrors that lag the latest releases
+- [ ] Build `LocalDataSourceManager` (scan local files for competitor/product data instead of manual paste)
+- [ ] Enforce `tone_preference` as a top-priority instruction in A3's prompt, not just one fused signal among several
+- [ ] Further CSV log schema refinement — tie each archived row to which HITL checkpoints fired and what feedback was given

@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(venv/bin/python main.py)",
+      "Bash(venv/bin/python -c ' *)",
+      "Bash(venv/bin/pip list *)",
+      "Bash(venv/bin/pip install *)",
+      "Bash(git check-ignore *)",
+      "Bash(venv/bin/python -c \"import dashscope; print\\(dashscope.base_http_api_url\\)\")",
+      "Read(//Users/neo/Library/Mobile Documents/com~apple~CloudDocs/20xx我的项目集/Etsy_Enamel_Pin/**)",
+      "Bash(cat .gitignore)",
+      "Bash(ls LICENSE*)",
+      "Bash(git rm *)",
+      "Bash(python -c \"import api\")",
+      "Bash(python3 -c \"import api\")",
+      "Bash(git checkout *)",
+      "Bash(venv/bin/python3 --version)",
+      "Bash(.venv/bin/python3 --version)",
+      "Bash(.venv/bin/pip list *)"
+    ]
+  }
+}

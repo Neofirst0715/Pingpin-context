@@ -1,0 +1,16 @@
+.env
+.venv/
+venv/
+Description/
+Tracking_Label/
+图片/
+.DS_Store
+.idea/
+__pycache__/
+*.pyc
+image.png
+Demo/
+Store_arrangement/
+persist_directory/
+Pingpin.dc.html
+
