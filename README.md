@@ -83,21 +83,29 @@ This repository is licensed **Apache 2.0**. `Etsy_Enamel_Pin` is included so the
 
 ```bash
 pip install -r requirements.txt
+pip install -r Etsy_Enamel_Pin/requirements.txt
 ```
 
-**1. Start DataHub locally:**
+*(Two separate `requirements.txt` files: the root one covers the inspection agent — dbt, DuckDB, MCP, DataHub; the one inside `Etsy_Enamel_Pin/` covers Pingpin's own A1–A5 pipeline. Both are needed to run the full loop.)*
+
+**1. Set Pingpin's LLM credentials** (Pingpin's A1–A5 pipeline calls Alibaba Cloud's DashScope Qwen-Plus model for compliance checking, SEO extraction, drafting, and audit scoring — you'll need your own DashScope API key to run the pipeline end-to-end):
+```bash
+export DASHSCOPE_API_KEY="<your DashScope API key>"
+```
+
+**2. Start DataHub locally:**
 ```bash
 pip install acryl-datahub
 datahub docker quickstart
 ```
 
-**2. Set MCP credentials** (generate a Personal Access Token from the DataHub UI at `localhost:9002` → Settings → Access Tokens):
+**3. Set MCP credentials** (generate a Personal Access Token from the DataHub UI at `localhost:9002` → Settings → Access Tokens):
 ```bash
 export DATAHUB_GMS_URL="http://localhost:8080"
 export DATAHUB_GMS_TOKEN="<your token>"
 ```
 
-**3. Build the dbt project:**
+**4. Build the dbt project:**
 ```bash
 cd dbt_duckdb_project
 dbt seed
@@ -107,7 +115,7 @@ dbt docs generate
 datahub ingest -c datahub_ingestion.yml
 ```
 
-**4. Run the inspection agent:**
+**5. Run the inspection agent:**
 ```bash
 cd ../Etsy_Enamel_Pin/agents
 python3 run_inspection.py
