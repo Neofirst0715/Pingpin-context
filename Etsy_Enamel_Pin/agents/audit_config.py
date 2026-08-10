@@ -119,3 +119,4 @@ The draft below has ALREADY passed all hard rules (word count, keywords, banned 
 
 
 KEYWORD_COVERAGE_THRESHOLD = 0.8
+MAX_HUMAN_RETRIES = 3

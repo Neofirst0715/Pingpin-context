@@ -28,3 +28,4 @@ class PingPinGoState(TypedDict):
     audit_result: dict[str,int]     #A4
     retry_count: int       #A4-A3
     last_edit_source: str  # "agent" | "human"
+    human_retry_count: int  # A4 human-intervention loop guard

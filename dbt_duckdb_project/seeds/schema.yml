@@ -19,9 +19,9 @@ seeds:
     tests:
        - dbt_utils.unique_combination_of_columns:
            arguments:
-           combination_of_columns:
-             - merchant_name
-             - sku_natural_name
+             combination_of_columns:
+               - merchant_name
+               - sku_natural_name
   - name: raw_description_updates_seed
     description: Transaction record table for AI-generated product description
     columns:

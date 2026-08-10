@@ -18,3 +18,10 @@ Pingpin.dc.html
 dbt_duckdb_project/target/
 dbt_duckdb_project/dbt_packages/
 dbt_duckdb_project/logs/
+
+logs/
+*.duckdb
+*.duckdb.wal
+dbt_duckdb_project/test.db
+dbt_duckdb_project/_stray_duckdb_backups/
+dbt_duckdb_project/__pycache__/

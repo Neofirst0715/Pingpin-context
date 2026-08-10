@@ -1,7 +1,8 @@
+import os
 import duckdb
-import sys
 
-sys.path.append("/Users/neofirst/Library/Mobile Documents/com~apple~CloudDocs/20xx My Projects/pingpin-context")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "..", "dbt_duckdb_project", "seeds", "dev.duckdb"))
 
 def get_or_create_sku_id(db_con, merchant_name, sku_natural_name, category):
     existing = db_con.execute(
@@ -18,8 +19,7 @@ def get_or_create_sku_id(db_con, merchant_name, sku_natural_name, category):
     return new_sku
 
 def write_raw_description_node(state) -> dict:
-    db_file = "/Users/neofirst/Library/Mobile Documents/com~apple~CloudDocs/20xx My Projects/pingpin-context/dbt_duckdb_project/seeds/dev.duckdb"
-    db_con = duckdb.connect(db_file)
+    db_con = duckdb.connect(DB_PATH)
     sku_value = state["sku"]
     category = state.get("category", "")
     final_desc = f"{state.get('final_title', '')} {state.get('final_description', '')}"

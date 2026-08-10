@@ -3,7 +3,7 @@ import os
 from typing import TypedDict, List, Optional
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
-from audit_config import BANNED_WORDS, USE_CASE_SIGNALS, MIN_WORD_COUNT, MAX_WORD_COUNT
+from audit_config import BANNED_WORDS, USE_CASE_SIGNALS, MIN_WORD_COUNT, MAX_WORD_COUNT, MAX_HUMAN_RETRIES
 from PingPinGoState import PingPinGoState
 from langchain_openai import ChatOpenAI
 from langgraph.types import interrupt
@@ -68,8 +68,23 @@ def human_intervention_node(state:PingPinGoState) -> dict:
         "final_title": human_edit.get("final_title", ""),
         "final_description": human_edit.get("final_description", ""),
         "retry_count": 0,
+        "human_retry_count": state.get("human_retry_count", 0) + 1,
         "system_feedback": "Human-edited,pending re-audit" ,
         "last_edit_source": "human",
+    }
+
+def human_review_exhausted_node(state: PingPinGoState) -> dict:
+    """
+    Terminal node reached when a human-sourced correction has failed the hard
+    gate MAX_HUMAN_RETRIES times in a row. Without this, should_continue_after_audit
+    routes back to human_intervention unconditionally whenever last_edit_source is
+    "human", with no cap -- a correction that doesn't fix the flagged issue loops forever.
+    """
+    return {
+        "system_feedback": (
+            f"Manual review exhausted after {state.get('human_retry_count', 0)} attempts "
+            f"without passing the hard gate. Last reason: {state.get('system_feedback', '')}"
+        ),
     }
 
 def audit_node(state:PingPinGoState) ->dict:

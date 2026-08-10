@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/MCP.iml" filepath="$PROJECT_DIR$/.idea/MCP.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/Pingpin-context.iml" filepath="$PROJECT_DIR$/.idea/Pingpin-context.iml" />
     </modules>
   </component>
 </project>

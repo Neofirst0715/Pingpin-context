@@ -4,9 +4,10 @@ from PingPinGoState import PingPinGoState
 from a1_compliance_agent import compliance_node
 from a2_seo_extraction_agent import seo_extraction_node
 from a3_listing_draft import listing_draft_node
-from a4_audit_node import audit_node, human_intervention_node
+from a4_audit_node import audit_node, human_intervention_node, human_review_exhausted_node
 from a5_final_delivery_node import final_delivery_node, human_delivery_approval_node, sanitize_text
 import dashscope
+from audit_config import MAX_HUMAN_RETRIES
 from report_schema import SkuDescriptionRewrite
 from raw_writer import write_raw_description_node
 from langgraph.checkpoint.memory import MemorySaver
@@ -22,6 +23,8 @@ def should_continue_after_audit(state) -> str:
     if state.get("system_feedback") == "Passed":
         return "complete"
     if state.get("last_edit_source") == "human":
+        if state.get("human_retry_count", 0) >= MAX_HUMAN_RETRIES:
+            return "give_up"
         return "human_intervention"
     if state.get("retry_count", 0) < 2:
         return "revise"
@@ -39,6 +42,7 @@ workflow.add_node("listing_draft", listing_draft_node)
 workflow.add_node("audit", audit_node)
 workflow.add_node("delivery", final_delivery_node)
 workflow.add_node("human_intervention", human_intervention_node)
+workflow.add_node("human_review_exhausted", human_review_exhausted_node)
 workflow.add_node("final_delivery_approval", human_delivery_approval_node)
 workflow.set_entry_point("compliance_check")
 workflow.add_conditional_edges(
@@ -57,10 +61,12 @@ workflow.add_conditional_edges(
     {
         "complete": "delivery",
         "revise": "listing_draft",
-        "human_intervention": "human_intervention"
+        "human_intervention": "human_intervention",
+        "give_up": "human_review_exhausted"
     }
 )
 workflow.add_edge("human_intervention", "audit")
+workflow.add_edge("human_review_exhausted", END)
 workflow.add_edge("delivery", "final_delivery_approval")
 workflow.add_node("write_raw_description", write_raw_description_node)
 workflow.add_conditional_edges(
